@@ -18,7 +18,7 @@ import torch
 
 from rlhf import group_relative_advantages, grpo_loss
 from experiments.common import (
-    build_harness, sample_group, score_sequences, clone_policy,
+    build_harness, sample_group, score_sequences, clone_policy, ppo_value_head_update,
 )
 from rlhf.parallel.fsdp import peak_memory_mb
 
@@ -50,21 +50,18 @@ def run_grpo(policy, reference, reward_bundle, tokenizer, prompts, steps, group_
     return trace
 
 
-def run_ppo_reinforce(policy, reference, reward_bundle, tokenizer, prompts, steps, group_size, mnt, lr=1e-5):
-    # Stand-in critic-based baseline (value head TODO on GPU); reward-mean baseline here.
-    opt = torch.optim.AdamW(policy.parameters(), lr=lr)
+def run_ppo(policy, reference, reward_bundle, tokenizer, prompts, steps, group_size, mnt, lr=1e-5):
+    # Real value-head PPO (same update as exp1, via the shared helper), so the two
+    # experiments compare the *same* PPO. The value head is what GRPO drops.
+    device = next(policy.parameters()).device
+    hidden = getattr(policy.config, "n_embd", None) or policy.config.hidden_size
+    value_head = torch.nn.Linear(hidden, 1).to(device)
+    opt = torch.optim.AdamW(list(policy.parameters()) + list(value_head.parameters()), lr=lr)
     trace = []
     for step in range(steps):
         prompt = prompts[step % len(prompts)]
-        seqs = sample_group(policy, tokenizer, prompt, group_size, mnt)
-        rewards = score_sequences(reward_bundle, tokenizer, seqs)
-        adv = rewards - rewards.mean()   # plain REINFORCE mean baseline (no /std -> not GRPO)
-        lps = _seq_logps(policy, seqs)
-        loss = -(adv.detach() * lps).mean()
-        opt.zero_grad(); loss.backward()
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
-        opt.step()
-        trace.append(rewards.mean().item())
+        trace.append(ppo_value_head_update(policy, value_head, reference, reward_bundle,
+                                           tokenizer, prompt, opt, group_size, mnt, kl_coef=0.0))
     return trace
 
 
@@ -85,7 +82,7 @@ def main():
         rm_dir=args.rm_dir, dataset=args.dataset, model=args.model, n_prompts=args.n_prompts)
 
     results = {}
-    for name, runner in [("grpo", run_grpo), ("ppo", run_ppo_reinforce)]:
+    for name, runner in [("grpo", run_grpo), ("ppo", run_ppo)]:
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         policy = clone_policy(base)

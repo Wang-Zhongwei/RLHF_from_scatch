@@ -23,6 +23,7 @@ from rlhf import (
     build_synthetic_preference_dataset, reward_train_step,
     build_eval_prompt_set, reward_head_forward,
     load_reward_model, load_prompt_set,
+    gae_advantages, policy_ratio, ppo_loss, k3_kl,
 )
 from experiments.pipeline_demo import HiddenBackbone, build_pref_batch
 
@@ -133,3 +134,52 @@ def eval_reward_and_kl(policy, reference, reward_bundle, tokenizer, prompts,
 
 def clone_policy(policy):
     return copy.deepcopy(policy)
+
+
+def ppo_value_head_update(policy, value_head, reference, reward_bundle, tokenizer, prompt,
+                          opt, group_size, max_new_tokens, kl_coef,
+                          clip_eps=0.2, vf_coef=0.5, ent_coef=0.01, gamma=0.99, lam=0.95):
+    """One value-head PPO update over a group sampled for ``prompt``; returns mean reward.
+
+    Shared by exp1 (frontier) and exp2 (sample efficiency) so "PPO" is the *same*
+    algorithm in both. The value head -- not the group mean -- is PPO's baseline:
+    raw RM reward -> per-token GAE with V(s) -> whiten advantages -> clipped surrogate
+    + value loss + entropy (rlhf.ppo_loss), plus a k3 KL penalty scaled by kl_coef.
+    """
+    device = next(policy.parameters()).device
+    seqs = sample_group(policy, tokenizer, prompt, group_size, max_new_tokens)
+    rewards = score_sequences(reward_bundle, tokenizer, seqs)
+    new_lps, ref_lps, values_l, advs, returns_l, logits_l = [], [], [], [], [], []
+    for seq, seq_reward in zip(seqs, rewards):
+        ids = seq.unsqueeze(0)
+        tgt = ids[0, 1:]
+        idx = torch.arange(tgt.shape[0], device=device)
+        out = policy(ids, output_hidden_states=True)
+        logits = out.logits[0, :-1]
+        new_lp = logits.log_softmax(-1)[idx, tgt]
+        values = value_head(out.hidden_states[-1][0, :-1]).squeeze(-1)
+        with torch.no_grad():
+            ref_lp = reference(ids).logits[0, :-1].log_softmax(-1)[idx, tgt]
+            token_rewards = torch.zeros(tgt.shape[0], device=device)
+            token_rewards[-1] = seq_reward
+            boot = torch.cat([values.detach(), values.new_zeros(1)])
+            adv = torch.as_tensor(
+                gae_advantages(token_rewards.cpu().numpy(), boot.cpu().numpy(), gamma, lam),
+                dtype=torch.float32, device=device)
+            returns = adv + values.detach()
+        new_lps.append(new_lp); ref_lps.append(ref_lp); values_l.append(values)
+        advs.append(adv); returns_l.append(returns); logits_l.append(logits)
+
+    new_lp = torch.cat(new_lps); ref_lp = torch.cat(ref_lps)
+    values = torch.cat(values_l); returns = torch.cat(returns_l); logits = torch.cat(logits_l)
+    adv = torch.cat(advs)
+    adv = (adv - adv.mean()) / (adv.std() + 1e-6)          # PPO advantage whitening
+    ratio = policy_ratio(new_lp, new_lp.detach())
+    out_ppo = ppo_loss(ratio, adv, values, returns, logits,
+                       clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef)
+    kl = k3_kl(new_lp, ref_lp).mean()
+    loss = out_ppo["loss"] + kl_coef * kl
+    opt.zero_grad(); loss.backward()
+    torch.nn.utils.clip_grad_norm_([p for g in opt.param_groups for p in g["params"]], 1.0)
+    opt.step()
+    return rewards.mean().item()

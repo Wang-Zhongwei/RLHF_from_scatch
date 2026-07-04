@@ -22,12 +22,11 @@ import os
 import torch
 
 from rlhf import (
-    grpo_loss, group_relative_advantages,
-    ppo_loss, policy_ratio, gae_advantages, k3_kl,
-    dpo_loss, load_preference_dataset,
+    grpo_loss, group_relative_advantages, dpo_loss, load_preference_dataset,
 )
 from experiments.common import (
     build_harness, sample_group, score_sequences, eval_reward_and_kl, clone_policy,
+    ppo_value_head_update,
 )
 
 
@@ -81,49 +80,10 @@ def align_with_ppo(policy, reference, reward_bundle, tokenizer, prompts,
         list(policy.parameters()) + list(value_head.parameters()), lr=lr)
     for step in range(steps):
         prompt = prompts[step % len(prompts)]
-        seqs = sample_group(policy, tokenizer, prompt, group_size, max_new_tokens)
-        # Raw RM reward: the *value head* is PPO's baseline (unlike GRPO's group mean),
-        # so we must NOT subtract the group mean here. GAE turns the terminal reward into
-        # per-token advantages using the critic; we whiten those advantages below.
-        rewards = score_sequences(reward_bundle, tokenizer, seqs)  # terminal RM score / seq
-        new_lps, ref_lps, values_l, advs, returns_l, logits_l = [], [], [], [], [], []
-        for seq, seq_reward in zip(seqs, rewards):
-            ids = seq.unsqueeze(0)
-            tgt = ids[0, 1:]
-            idx = torch.arange(tgt.shape[0], device=device)
-
-            out = policy(ids, output_hidden_states=True)
-            logits = out.logits[0, :-1]                         # (T, V)
-            new_lp = logits.log_softmax(-1)[idx, tgt]           # (T,) per-token
-            values = value_head(out.hidden_states[-1][0, :-1]).squeeze(-1)  # (T,)
-
-            with torch.no_grad():
-                ref_lp = reference(ids).logits[0, :-1].log_softmax(-1)[idx, tgt]
-                token_rewards = torch.zeros(tgt.shape[0], device=device)  # sparse: reward on last token
-                token_rewards[-1] = seq_reward
-                boot = torch.cat([values.detach(), values.new_zeros(1)])  # V_T = 0 (episode end)
-                adv = torch.as_tensor(
-                    gae_advantages(token_rewards.cpu().numpy(), boot.cpu().numpy(), gamma, lam),
-                    dtype=torch.float32, device=device)
-                returns = adv + values.detach()                 # value-head target
-            new_lps.append(new_lp); ref_lps.append(ref_lp); values_l.append(values)
-            advs.append(adv); returns_l.append(returns); logits_l.append(logits)
-
-        new_lp = torch.cat(new_lps); ref_lp = torch.cat(ref_lps)
-        values = torch.cat(values_l); returns = torch.cat(returns_l); logits = torch.cat(logits_l)
-        adv = torch.cat(advs)
-        # Standard PPO advantage whitening: variance reduction on the critic's advantages
-        # (already baselined by V(s) inside GAE), NOT a group-mean reward baseline.
-        adv = (adv - adv.mean()) / (adv.std() + 1e-6)
-
-        ratio = policy_ratio(new_lp, new_lp.detach())           # single on-policy step
-        out_ppo = ppo_loss(ratio, adv, values, returns, logits,
-                           clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef)
-        kl = k3_kl(new_lp, ref_lp).mean()
-        loss = out_ppo["loss"] + kl_coef * kl
-        opt.zero_grad(); loss.backward()
-        torch.nn.utils.clip_grad_norm_(list(policy.parameters()) + list(value_head.parameters()), 1.0)
-        opt.step()
+        ppo_value_head_update(policy, value_head, reference, reward_bundle, tokenizer, prompt,
+                              opt, group_size, max_new_tokens, kl_coef,
+                              clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef,
+                              gamma=gamma, lam=lam)
     return policy
 
 
