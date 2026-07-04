@@ -58,7 +58,7 @@ def run_ppo_reinforce(policy, reference, reward_bundle, tokenizer, prompts, step
         prompt = prompts[step % len(prompts)]
         seqs = sample_group(policy, tokenizer, prompt, group_size, mnt)
         rewards = score_sequences(reward_bundle, tokenizer, seqs)
-        adv = (rewards - rewards.mean()) / (rewards.std() + 1e-6)  # unit-scale for real RM
+        adv = rewards - rewards.mean()   # plain REINFORCE mean baseline (no /std -> not GRPO)
         lps = _seq_logps(policy, seqs)
         loss = -(adv.detach() * lps).mean()
         opt.zero_grad(); loss.backward()
