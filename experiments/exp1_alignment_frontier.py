@@ -69,6 +69,11 @@ def align_with_ppo(policy, reference, reward_bundle, tokenizer, prompts,
     # (rlhf.ppo_loss), plus a k3 KL penalty to the frozen reference weighted by
     # kl_coef (=beta). The critic is exactly what GRPO drops for its group
     # baseline -- see rlhf/grpo.py and exp2's memory story.
+    #
+    # NOTE: PPO does not *need* a group -- V(s) is its baseline, so one completion
+    # per step suffices. We sample a group here only for parity with GRPO (equal
+    # rollout budget/step -> comparable frontier & sample efficiency); the group
+    # supplies extra tokens, never the baseline.
     device = next(policy.parameters()).device
     hidden = getattr(policy.config, "n_embd", None) or policy.config.hidden_size
     value_head = torch.nn.Linear(hidden, 1).to(device)
