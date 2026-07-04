@@ -9,6 +9,7 @@ results_fast/
 results_smoke/
 scripts/_smoke*.sh
 *.png
+!figures/*.png
 .pytest_cache/
 .serena/
 .DS_Store

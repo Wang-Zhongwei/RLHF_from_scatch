@@ -22,8 +22,17 @@ mkdir -p logs results
 
 nvidia-smi || true
 
+# gpt2-medium (355M) so FSDP's sharded optimizer state dominates -> a real memory drop.
+# Keep batch/seq modest: activations don't shard, so a big batch would flatten the curve.
+BENCH_MODEL="${BENCH_MODEL:-gpt2-medium}"
+BENCH_JSON="results/bench_parallel.json"
+rm -f "${BENCH_JSON}"   # fresh sweep
+
 for NPROC in 1 2 4; do
   echo "=== world_size=${NPROC} ==="
   torchrun --standalone --nproc_per_node=${NPROC} -m experiments.bench_parallel \
-    --steps 20 --batch-size 8 --seq-len 128
+    --model "${BENCH_MODEL}" --steps 20 --batch-size 8 --seq-len 128 --out "${BENCH_JSON}"
 done
+
+# Render the full recruiter-facing figure (bench panel + the existing exp1/exp2/RM data).
+python -m experiments.plot_showcase || true

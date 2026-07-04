@@ -13,6 +13,28 @@ Runs end-to-end on CPU with `sshleifer/tiny-gpt2` for fast iteration/CI, and
 scales to real GPT-2 / Llama checkpoints on multi-GPU (torchrun + NCCL) by
 changing one model name.
 
+## Results
+
+![RLHF from scratch — reward modeling, alignment, and model-parallel scaling](figures/showcase.png)
+
+Trained on a single A100 (multi-GPU for the scaling panel), gpt2-medium, real human
+preferences from `Dahoas/rm-static`:
+
+- **A · Reward model learns real preferences** — 0.679 held-out pairwise accuracy on
+  8,932 preference pairs (0.5 = random), full-backbone Bradley-Terry.
+- **B · Alignment frontier** — all three methods beat the base SFT policy (reward −3.07);
+  **GRPO** buys the most reward per unit of KL drift (up to −1.02), **PPO** (with a
+  warmed-up value head) and **DPO** improve more modestly. kl_coef (PPO/GRPO KL penalty)
+  and DPO's beta are swept separately — they aren't the same knob.
+- **C · Sample efficiency** — GRPO climbs faster than PPO *and* uses ~6 GB less memory,
+  because it drops PPO's value head.
+- **D · Model-parallel scaling** — FSDP (ZeRO-3) shards optimizer state, cutting peak
+  memory/GPU from 9.0 GB → 3.6 GB across 1→4 GPUs.
+
+Reproduce: train the reward model (`scripts/train_reward.slurm`), then
+`scripts/train_hpc.slurm` (frontier + sample efficiency) and `scripts/bench_parallel.slurm`
+(scaling), and render with `python -m experiments.plot_showcase`.
+
 ## Layout
 
 ```
@@ -35,11 +57,14 @@ rlhf/
     tensor_parallel.py Megatron column/row-parallel linears (custom autograd)
     fsdp.py            ZeRO-3 FSDP wrapping + peak-memory measurement
 experiments/
+  train_reward_model.py       train the scalar RM on real preferences (Bradley-Terry)
   pipeline_demo.py            end-to-end SFT->RM->win-rate->chat smoke run
   exp1_alignment_frontier.py  reward-vs-KL frontier: PPO vs GRPO vs DPO
   exp2_grpo_sample_efficiency.py  GRPO vs PPO reward-per-step + peak memory
   bench_parallel.py           FSDP memory/throughput scaling under torchrun
+  plot_showcase.py            render the results one-pager (figures/showcase.png)
 scripts/                      slurm jobs for coe-hpc3
+figures/                      committed result figures for the README
 tests/                        hermetic unit tests for the math + TP correctness
 ```
 
