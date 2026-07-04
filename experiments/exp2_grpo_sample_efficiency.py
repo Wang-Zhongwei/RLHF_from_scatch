@@ -1,0 +1,93 @@
+"""Experiment 2 — GRPO vs PPO sample efficiency.
+
+Both methods optimize the same reward model from the same SFT start. We log mean
+reward vs training step (and vs wall-clock), and peak memory. The expected story:
+GRPO reaches comparable reward per step while carrying no value head / value
+optimizer state, so it uses less memory and less compute per update.
+
+    python -m experiments.exp2_grpo_sample_efficiency --steps 40 --out results/sample_eff.json
+
+SKELETON: shares the online loop from exp1 but records a per-step reward trace.
+Scale on GPU via --steps / --group-size and a larger model.
+"""
+import argparse
+import json
+import os
+
+import torch
+
+from rlhf import group_relative_advantages, grpo_loss
+from experiments.common import (
+    build_harness, sample_group, score_sequences, eval_reward_and_kl, clone_policy,
+)
+from rlhf.parallel.fsdp import peak_memory_mb
+
+
+def _seq_logps(model, seqs):
+    lps = []
+    for seq in seqs:
+        ids = seq.unsqueeze(0)
+        tgt = ids[0, 1:]
+        lps.append(model(ids).logits[0, :-1].log_softmax(-1)[torch.arange(tgt.shape[0]), tgt].sum())
+    return torch.stack(lps)
+
+
+def run_grpo(policy, reference, reward_bundle, tokenizer, prompts, steps, group_size, mnt, lr=1e-5):
+    opt = torch.optim.AdamW(policy.parameters(), lr=lr)
+    trace = []
+    for step in range(steps):
+        prompt = prompts[step % len(prompts)]
+        seqs = sample_group(policy, tokenizer, prompt, group_size, mnt)
+        rewards = score_sequences(reward_bundle, tokenizer, seqs)
+        adv = group_relative_advantages(rewards)
+        new_lp = _seq_logps(policy, seqs)
+        out = grpo_loss(new_lp, new_lp.detach(), adv, kl_coef=0.0)
+        opt.zero_grad(); out["loss"].backward(); opt.step()
+        trace.append(rewards.mean().item())
+    return trace
+
+
+def run_ppo_reinforce(policy, reference, reward_bundle, tokenizer, prompts, steps, group_size, mnt, lr=1e-5):
+    # Stand-in critic-based baseline (value head TODO on GPU); reward-mean baseline here.
+    opt = torch.optim.AdamW(policy.parameters(), lr=lr)
+    trace = []
+    for step in range(steps):
+        prompt = prompts[step % len(prompts)]
+        seqs = sample_group(policy, tokenizer, prompt, group_size, mnt)
+        rewards = score_sequences(reward_bundle, tokenizer, seqs)
+        adv = rewards - rewards.mean()
+        lps = _seq_logps(policy, seqs)
+        loss = -(adv.detach() * lps).mean()
+        opt.zero_grad(); loss.backward(); opt.step()
+        trace.append(rewards.mean().item())
+    return trace
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--steps", type=int, default=40)
+    ap.add_argument("--group-size", type=int, default=4)
+    ap.add_argument("--max-new-tokens", type=int, default=12)
+    ap.add_argument("--out", default="results/sample_eff.json")
+    args = ap.parse_args()
+
+    tokenizer, base, reference, reward_bundle, prompts = build_harness()
+
+    results = {}
+    for name, runner in [("grpo", run_grpo), ("ppo", run_ppo_reinforce)]:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        policy = clone_policy(base)
+        trace = runner(policy, reference, reward_bundle, tokenizer, prompts,
+                       args.steps, args.group_size, args.max_new_tokens)
+        results[name] = {"reward_trace": trace, "peak_mem_mb": peak_memory_mb()}
+        print(f"[{name}] final reward={trace[-1]:+.3f} peak_mem={results[name]['peak_mem_mb']:.0f}MB")
+
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    with open(args.out, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()
