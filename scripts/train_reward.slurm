@@ -25,5 +25,5 @@ nvidia-smi || true
 python -m experiments.train_reward_model \
   --model "${RM_MODEL:-gpt2-medium}" --dataset "${RM_DATASET:-Dahoas/rm-static}" \
   --max-examples "${RM_MAX:-10000}" --epochs "${RM_EPOCHS:-2}" \
-  --batch-size "${RM_BS:-16}" --max-length "${RM_MAXLEN:-512}" \
+  --batch-size "${RM_BS:-8}" --max-length "${RM_MAXLEN:-512}" \
   --lr "${RM_LR:-1e-5}" ${RM_FREEZE:+--freeze-backbone} --out "${RM_OUT:-results/reward_model}"

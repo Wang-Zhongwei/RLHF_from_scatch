@@ -24,6 +24,7 @@ from rlhf import (
     build_eval_prompt_set, reward_head_forward,
     load_reward_model, load_prompt_set,
     gae_advantages, policy_ratio, ppo_loss, k3_kl,
+    compute_returns, value_function_loss,
 )
 from experiments.pipeline_demo import HiddenBackbone, build_pref_batch
 
@@ -33,11 +34,16 @@ def pick_device(device=None):
 
 
 def build_harness(seed=0, rm_steps=30, rm_dir="results/reward_model",
-                  dataset="Dahoas/rm-static", model=None, n_prompts=16, device=None):
-    """Return (tokenizer, policy, reference, reward_bundle, prompts).
+                  dataset="Dahoas/rm-static", model=None,
+                  n_train_prompts=128, n_eval_prompts=32, device=None):
+    """Return (tokenizer, policy, reference, reward_bundle, train_prompts, eval_prompts).
 
-    If ``rm_dir`` holds a saved reward model, load it (real RM, real prompts, GPU);
-    otherwise build the synthetic toy RM on tiny-gpt2 for hermetic/offline CI.
+    Training rollouts and held-out eval draw from **disjoint** prompt sets so a policy
+    is never scored on the prompts it optimized: with a real RM they come from the
+    dataset's ``train`` / ``test`` splits. If ``rm_dir`` holds a saved reward model,
+    load it (real RM, real prompts, GPU); otherwise build the synthetic toy RM on
+    tiny-gpt2 for hermetic/offline CI, where both sets are the tiny eval prompt set
+    (the leak is irrelevant for the toy smoke, so the two lists are identical).
     """
     torch.manual_seed(seed)
     device = pick_device(device)
@@ -61,7 +67,9 @@ def build_harness(seed=0, rm_steps=30, rm_dir="results/reward_model",
         p.requires_grad = False
 
     if real_rm:
-        prompts = load_prompt_set(dataset, "test", n_prompts, seed)
+        # Disjoint splits: train the aligners on ``train`` prompts, score on held-out ``test``.
+        train_prompts = load_prompt_set(dataset, "train", n_train_prompts, seed)
+        eval_prompts = load_prompt_set(dataset, "test", n_eval_prompts, seed)
     else:
         # Train a small reward head on synthetic preferences (frozen reference backbone).
         hidden = getattr(policy.config, "n_embd", None) or policy.config.hidden_size
@@ -73,9 +81,10 @@ def build_harness(seed=0, rm_steps=30, rm_dir="results/reward_model",
         for _ in range(rm_steps):
             reward_train_step(backbone, reward_head, rm_batch, rm_opt, pad_id=tokenizer.pad_token_id)
         reward_bundle = {"model": reference, "weight": reward_head.weight, "bias": reward_head.bias}
-        prompts = build_eval_prompt_set()
+        # Toy path: the leak is irrelevant for the smoke, so train == eval (identical lists).
+        train_prompts = eval_prompts = build_eval_prompt_set()
 
-    return tokenizer, policy, reference, reward_bundle, prompts
+    return tokenizer, policy, reference, reward_bundle, train_prompts, eval_prompts
 
 
 @torch.no_grad()
@@ -134,6 +143,44 @@ def eval_reward_and_kl(policy, reference, reward_bundle, tokenizer, prompts,
 
 def clone_policy(policy):
     return copy.deepcopy(policy)
+
+
+def value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts, warmup_steps,
+                      group_size, max_new_tokens, vf_lr=1e-3, gamma=0.99):
+    """Pretrain the value head (policy frozen) before PPO's policy updates begin.
+
+    Regresses V(s) toward Monte-Carlo returns (discounted terminal RM reward) -- a
+    fixed target that doesn't bootstrap off the random critic -- so PPO starts with a
+    calibrated baseline instead of noise. Trains only the value head, at its own
+    (higher) LR. Returns the final value loss, or None if disabled.
+    """
+    if warmup_steps <= 0:
+        return None
+    opt_v = torch.optim.AdamW(value_head.parameters(), lr=vf_lr)
+    last = None
+    for step in range(warmup_steps):
+        prompt = prompts[step % len(prompts)]
+        with torch.no_grad():
+            seqs = sample_group(policy, tokenizer, prompt, group_size, max_new_tokens)
+            rewards = score_sequences(reward_bundle, tokenizer, seqs)
+        values_l, returns_l = [], []
+        for seq, seq_reward in zip(seqs, rewards):
+            ids = seq.unsqueeze(0)
+            tgt = ids[0, 1:]
+            with torch.no_grad():
+                hidden = policy(ids, output_hidden_states=True).hidden_states[-1][0, :-1]
+                token_rewards = torch.zeros(tgt.shape[0], device=hidden.device)
+                token_rewards[-1] = seq_reward
+                mc = torch.as_tensor(compute_returns(token_rewards.cpu().numpy(), gamma),
+                                     dtype=torch.float32, device=hidden.device)
+            values_l.append(value_head(hidden).squeeze(-1))
+            returns_l.append(mc)
+        loss = value_function_loss(torch.cat(values_l), torch.cat(returns_l))
+        opt_v.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(value_head.parameters(), 1.0)
+        opt_v.step()
+        last = loss.item()
+    return last
 
 
 def ppo_value_head_update(policy, value_head, reference, reward_bundle, tokenizer, prompt,

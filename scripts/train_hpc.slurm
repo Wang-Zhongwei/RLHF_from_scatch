@@ -29,16 +29,22 @@ test -d results/reward_model || { echo "ERROR: results/reward_model missing; run
 # Decoupled sweeps: kl_coef (additive KL penalty) for PPO/GRPO, beta (temperature) for DPO.
 # Gentle LR (5e-6) + a wide kl_coef range trace the reward-vs-KL tradeoff without the
 # policy reward-hacking into collapse (which pins KL at extreme values).
+# Training rolls out over 128 train prompts (each swept before eval); reward/KL are scored
+# on a disjoint 32-prompt held-out (test) split. PPO warms its value head for 30 steps first.
 python -m experiments.exp1_alignment_frontier \
   --rm-dir results/reward_model --dataset Dahoas/rm-static \
-  --steps 120 --group-size 8 --max-new-tokens 32 --n-prompts 16 --rl-lr 5e-6 \
+  --steps 200 --group-size 8 --max-new-tokens 32 \
+  --n-train-prompts 128 --n-eval-prompts 32 --rl-lr 5e-6 \
+  --value-warmup 30 --vf-lr 1e-3 \
   --kl-coefs 0.0 0.1 0.5 2.0 --dpo-betas 0.05 0.1 0.3 0.5 \
   --out results/frontier.json
 
-# Experiment 2: GRPO vs PPO sample efficiency.
+# Experiment 2: GRPO vs PPO sample efficiency (same PPO, incl. value-head warmup).
 python -m experiments.exp2_grpo_sample_efficiency \
   --rm-dir results/reward_model --dataset Dahoas/rm-static \
-  --steps 120 --group-size 8 --max-new-tokens 32 --n-prompts 16 --rl-lr 5e-6 \
+  --steps 200 --group-size 8 --max-new-tokens 32 \
+  --n-train-prompts 128 --n-eval-prompts 32 --rl-lr 5e-6 \
+  --value-warmup 30 --vf-lr 1e-3 \
   --out results/sample_eff.json
 
 python -m experiments.plot_frontier results/frontier.json results/sample_eff.json

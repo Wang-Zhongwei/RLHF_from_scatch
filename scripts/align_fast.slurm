@@ -29,13 +29,17 @@ python -m experiments.train_reward_model \
 
 python -m experiments.exp1_alignment_frontier \
   --rm-dir "$RM" --dataset Dahoas/rm-static \
-  --steps 100 --group-size 8 --max-new-tokens 32 --n-prompts 8 \
+  --steps 100 --group-size 8 --max-new-tokens 32 \
+  --n-train-prompts 32 --n-eval-prompts 16 \
+  --value-warmup 10 --vf-lr 1e-3 \
   --kl-coefs 0.0 0.05 0.1 --dpo-betas 0.05 0.1 0.5 \
   --out results_fast/frontier.json
 
 python -m experiments.exp2_grpo_sample_efficiency \
   --rm-dir "$RM" --dataset Dahoas/rm-static \
-  --steps 100 --group-size 8 --max-new-tokens 32 --n-prompts 8 \
+  --steps 100 --group-size 8 --max-new-tokens 32 \
+  --n-train-prompts 32 --n-eval-prompts 16 \
+  --value-warmup 10 --vf-lr 1e-3 \
   --out results_fast/sample_eff.json
 
 python -m experiments.plot_frontier results_fast/frontier.json results_fast/sample_eff.json

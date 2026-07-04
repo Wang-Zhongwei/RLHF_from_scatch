@@ -26,7 +26,7 @@ from rlhf import (
 )
 from experiments.common import (
     build_harness, sample_group, score_sequences, eval_reward_and_kl, clone_policy,
-    ppo_value_head_update,
+    ppo_value_head_update, value_head_warmup,
 )
 
 
@@ -62,7 +62,7 @@ def align_with_grpo(policy, reference, reward_bundle, tokenizer, prompts,
 def align_with_ppo(policy, reference, reward_bundle, tokenizer, prompts,
                    steps, group_size, max_new_tokens, kl_coef, lr=1e-5,
                    clip_eps=0.2, vf_coef=0.5, ent_coef=0.01, gamma=0.99, lam=0.95,
-                   pref_pairs=None):
+                   pref_pairs=None, value_warmup=0, vf_lr=1e-3):
     # Faithful PPO: a learned value head supplies per-token GAE baselines and the
     # update is the scaffold's clipped surrogate + value loss + entropy bonus
     # (rlhf.ppo_loss), plus a k3 KL penalty to the frozen reference weighted by
@@ -78,6 +78,14 @@ def align_with_ppo(policy, reference, reward_bundle, tokenizer, prompts,
     value_head = torch.nn.Linear(hidden, 1).to(device)
     opt = torch.optim.AdamW(
         list(policy.parameters()) + list(value_head.parameters()), lr=lr)
+    # Warm the critic (policy frozen, V -> MC returns) before any policy update, so early
+    # GAE advantages use a calibrated baseline instead of a random head.
+    warm_loss = value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts,
+                                  value_warmup, group_size, max_new_tokens, vf_lr=vf_lr,
+                                  gamma=gamma)
+    if warm_loss is not None:
+        print(f"[ppo] value-head warmup ({value_warmup} steps) final vf_loss={warm_loss:.4f}",
+              flush=True)
     for step in range(steps):
         prompt = prompts[step % len(prompts)]
         ppo_value_head_update(policy, value_head, reference, reward_bundle, tokenizer, prompt,
@@ -162,26 +170,45 @@ def main():
     ap.add_argument("--rm-dir", default="results/reward_model")
     ap.add_argument("--dataset", default="Dahoas/rm-static")
     ap.add_argument("--model", default=None)
-    ap.add_argument("--n-prompts", type=int, default=16)
+    ap.add_argument("--n-train-prompts", type=int, default=128,
+                    help="prompts for training rollouts (disjoint from eval)")
+    ap.add_argument("--n-eval-prompts", type=int, default=32,
+                    help="held-out prompts for reward/KL eval (disjoint from train)")
+    ap.add_argument("--n-prompts", type=int, default=None,
+                    help="back-compat: if set, overrides --n-train-prompts")
     ap.add_argument("--rl-lr", type=float, default=1e-5,
                     help="policy LR for the RL aligners; lower avoids reward-hacking collapse")
+    ap.add_argument("--value-warmup", type=int, default=30,
+                    help="PPO value-head warmup steps (critic pretrain before policy updates)")
+    ap.add_argument("--vf-lr", type=float, default=1e-3, help="LR for the PPO value-head warmup")
     ap.add_argument("--out", default="results/frontier.json")
     args = ap.parse_args()
+
+    n_train = args.n_prompts or args.n_train_prompts
 
     kl_coefs = args.kl_coefs or args.betas
     dpo_betas = args.dpo_betas or args.betas
     sweeps = {"grpo": kl_coefs, "ppo": kl_coefs, "dpo": dpo_betas}
 
-    tokenizer, base_policy, reference, reward_bundle, prompts = build_harness(
-        rm_dir=args.rm_dir, dataset=args.dataset, model=args.model, n_prompts=args.n_prompts)
+    tokenizer, base_policy, reference, reward_bundle, train_prompts, eval_prompts = build_harness(
+        rm_dir=args.rm_dir, dataset=args.dataset, model=args.model,
+        n_train_prompts=n_train, n_eval_prompts=args.n_eval_prompts)
+    # Guarantee a full sweep of the training set before eval: round-robin covers every
+    # train prompt once steps >= len(train_prompts); bump steps up if the caller asked for fewer.
+    steps = args.steps
+    if steps < len(train_prompts):
+        print(f"[exp1] bumping --steps {steps} -> {len(train_prompts)} to cover the full "
+              f"training set before eval", flush=True)
+        steps = len(train_prompts)
 
     # True DPO trains on the dataset's real offline pairs (None -> on-policy fallback).
     pref_pairs = None
     if args.rm_dir and os.path.isdir(args.rm_dir):
         pref_pairs = load_preference_dataset(args.dataset, "train",
-                                             max_examples=max(args.steps, 500))
+                                             max_examples=max(steps, 500))
 
-    r0, kl0 = eval_reward_and_kl(base_policy, reference, reward_bundle, tokenizer, prompts,
+    # Base and every method are scored on the held-out eval prompts, never the train set.
+    r0, kl0 = eval_reward_and_kl(base_policy, reference, reward_bundle, tokenizer, eval_prompts,
                                  args.group_size, args.max_new_tokens)
     frontier = {"base": {"reward": r0, "kl": kl0}, "methods": {}}
 
@@ -189,10 +216,12 @@ def main():
         frontier["methods"][name] = []
         for coef in sweeps[name]:
             policy = clone_policy(base_policy)
-            aligner(policy, reference, reward_bundle, tokenizer, prompts,
-                    args.steps, args.group_size, args.max_new_tokens, coef,
-                    lr=args.rl_lr, pref_pairs=pref_pairs)
-            reward, kl = eval_reward_and_kl(policy, reference, reward_bundle, tokenizer, prompts,
+            kw = dict(lr=args.rl_lr, pref_pairs=pref_pairs)
+            if name == "ppo":
+                kw.update(value_warmup=args.value_warmup, vf_lr=args.vf_lr)
+            aligner(policy, reference, reward_bundle, tokenizer, train_prompts,
+                    steps, args.group_size, args.max_new_tokens, coef, **kw)
+            reward, kl = eval_reward_and_kl(policy, reference, reward_bundle, tokenizer, eval_prompts,
                                             args.group_size, args.max_new_tokens)
             frontier["methods"][name].append({"beta": coef, "reward": reward, "kl": kl})
             knob = "beta" if name == "dpo" else "kl_coef"

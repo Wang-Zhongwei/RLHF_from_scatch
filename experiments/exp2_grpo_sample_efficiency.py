@@ -19,6 +19,7 @@ import torch
 from rlhf import group_relative_advantages, grpo_loss
 from experiments.common import (
     build_harness, sample_group, score_sequences, clone_policy, ppo_value_head_update,
+    value_head_warmup,
 )
 from rlhf.parallel.fsdp import peak_memory_mb
 
@@ -50,13 +51,20 @@ def run_grpo(policy, reference, reward_bundle, tokenizer, prompts, steps, group_
     return trace
 
 
-def run_ppo(policy, reference, reward_bundle, tokenizer, prompts, steps, group_size, mnt, lr=1e-5):
+def run_ppo(policy, reference, reward_bundle, tokenizer, prompts, steps, group_size, mnt, lr=1e-5,
+            value_warmup=0, vf_lr=1e-3):
     # Real value-head PPO (same update as exp1, via the shared helper), so the two
     # experiments compare the *same* PPO. The value head is what GRPO drops.
     device = next(policy.parameters()).device
     hidden = getattr(policy.config, "n_embd", None) or policy.config.hidden_size
     value_head = torch.nn.Linear(hidden, 1).to(device)
     opt = torch.optim.AdamW(list(policy.parameters()) + list(value_head.parameters()), lr=lr)
+    # Same critic warmup as exp1's PPO, so "PPO" is identical across both experiments.
+    warm_loss = value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts,
+                                  value_warmup, group_size, mnt, vf_lr=vf_lr)
+    if warm_loss is not None:
+        print(f"[ppo] value-head warmup ({value_warmup} steps) final vf_loss={warm_loss:.4f}",
+              flush=True)
     trace = []
     for step in range(steps):
         prompt = prompts[step % len(prompts)]
@@ -73,21 +81,40 @@ def main():
     ap.add_argument("--rm-dir", default="results/reward_model")
     ap.add_argument("--dataset", default="Dahoas/rm-static")
     ap.add_argument("--model", default=None)
-    ap.add_argument("--n-prompts", type=int, default=16)
+    ap.add_argument("--n-train-prompts", type=int, default=128,
+                    help="prompts for training rollouts")
+    ap.add_argument("--n-eval-prompts", type=int, default=32,
+                    help="held-out prompt count (unused here; kept for build_harness parity)")
+    ap.add_argument("--n-prompts", type=int, default=None,
+                    help="back-compat: if set, overrides --n-train-prompts")
     ap.add_argument("--rl-lr", type=float, default=1e-5)
+    ap.add_argument("--value-warmup", type=int, default=30,
+                    help="PPO value-head warmup steps (critic pretrain before policy updates)")
+    ap.add_argument("--vf-lr", type=float, default=1e-3, help="LR for the PPO value-head warmup")
     ap.add_argument("--out", default="results/sample_eff.json")
     args = ap.parse_args()
 
-    tokenizer, base, reference, reward_bundle, prompts = build_harness(
-        rm_dir=args.rm_dir, dataset=args.dataset, model=args.model, n_prompts=args.n_prompts)
+    n_train = args.n_prompts or args.n_train_prompts
+    # exp2's metric is the per-step training reward trace, so it only needs the train prompts.
+    tokenizer, base, reference, reward_bundle, train_prompts, _eval_prompts = build_harness(
+        rm_dir=args.rm_dir, dataset=args.dataset, model=args.model,
+        n_train_prompts=n_train, n_eval_prompts=args.n_eval_prompts)
+    steps = args.steps
+    if steps < len(train_prompts):
+        print(f"[exp2] bumping --steps {steps} -> {len(train_prompts)} to cover the full "
+              f"training set", flush=True)
+        steps = len(train_prompts)
 
     results = {}
     for name, runner in [("grpo", run_grpo), ("ppo", run_ppo)]:
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         policy = clone_policy(base)
-        trace = runner(policy, reference, reward_bundle, tokenizer, prompts,
-                       args.steps, args.group_size, args.max_new_tokens, lr=args.rl_lr)
+        kw = dict(lr=args.rl_lr)
+        if name == "ppo":
+            kw.update(value_warmup=args.value_warmup, vf_lr=args.vf_lr)
+        trace = runner(policy, reference, reward_bundle, tokenizer, train_prompts,
+                       steps, args.group_size, args.max_new_tokens, **kw)
         results[name] = {"reward_trace": trace, "peak_mem_mb": peak_memory_mb()}
         print(f"[{name}] final reward={trace[-1]:+.3f} peak_mem={results[name]['peak_mem_mb']:.0f}MB")
 
