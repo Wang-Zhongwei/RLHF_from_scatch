@@ -5,6 +5,9 @@ venv/
 env/
 logs/
 results/
+results_fast/
+results_smoke/
+scripts/_smoke*.sh
 *.png
 .pytest_cache/
 .serena/

@@ -18,7 +18,7 @@ import torch
 
 from rlhf import group_relative_advantages, grpo_loss
 from experiments.common import (
-    build_harness, sample_group, score_sequences, eval_reward_and_kl, clone_policy,
+    build_harness, sample_group, score_sequences, clone_policy,
 )
 from rlhf.parallel.fsdp import peak_memory_mb
 
@@ -28,7 +28,8 @@ def _seq_logps(model, seqs):
     for seq in seqs:
         ids = seq.unsqueeze(0)
         tgt = ids[0, 1:]
-        lps.append(model(ids).logits[0, :-1].log_softmax(-1)[torch.arange(tgt.shape[0]), tgt].sum())
+        rng = torch.arange(tgt.shape[0], device=ids.device)
+        lps.append(model(ids).logits[0, :-1].log_softmax(-1)[rng, tgt].sum())
     return torch.stack(lps)
 
 
@@ -42,7 +43,9 @@ def run_grpo(policy, reference, reward_bundle, tokenizer, prompts, steps, group_
         adv = group_relative_advantages(rewards)
         new_lp = _seq_logps(policy, seqs)
         out = grpo_loss(new_lp, new_lp.detach(), adv, kl_coef=0.0)
-        opt.zero_grad(); out["loss"].backward(); opt.step()
+        opt.zero_grad(); out["loss"].backward()
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+        opt.step()
         trace.append(rewards.mean().item())
     return trace
 
@@ -55,10 +58,12 @@ def run_ppo_reinforce(policy, reference, reward_bundle, tokenizer, prompts, step
         prompt = prompts[step % len(prompts)]
         seqs = sample_group(policy, tokenizer, prompt, group_size, mnt)
         rewards = score_sequences(reward_bundle, tokenizer, seqs)
-        adv = rewards - rewards.mean()
+        adv = (rewards - rewards.mean()) / (rewards.std() + 1e-6)  # unit-scale for real RM
         lps = _seq_logps(policy, seqs)
         loss = -(adv.detach() * lps).mean()
-        opt.zero_grad(); loss.backward(); opt.step()
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+        opt.step()
         trace.append(rewards.mean().item())
     return trace
 
@@ -68,10 +73,16 @@ def main():
     ap.add_argument("--steps", type=int, default=40)
     ap.add_argument("--group-size", type=int, default=4)
     ap.add_argument("--max-new-tokens", type=int, default=12)
+    ap.add_argument("--rm-dir", default="results/reward_model")
+    ap.add_argument("--dataset", default="Dahoas/rm-static")
+    ap.add_argument("--model", default=None)
+    ap.add_argument("--n-prompts", type=int, default=16)
+    ap.add_argument("--rl-lr", type=float, default=1e-5)
     ap.add_argument("--out", default="results/sample_eff.json")
     args = ap.parse_args()
 
-    tokenizer, base, reference, reward_bundle, prompts = build_harness()
+    tokenizer, base, reference, reward_bundle, prompts = build_harness(
+        rm_dir=args.rm_dir, dataset=args.dataset, model=args.model, n_prompts=args.n_prompts)
 
     results = {}
     for name, runner in [("grpo", run_grpo), ("ppo", run_ppo_reinforce)]:
@@ -79,7 +90,7 @@ def main():
             torch.cuda.reset_peak_memory_stats()
         policy = clone_policy(base)
         trace = runner(policy, reference, reward_bundle, tokenizer, prompts,
-                       args.steps, args.group_size, args.max_new_tokens)
+                       args.steps, args.group_size, args.max_new_tokens, lr=args.rl_lr)
         results[name] = {"reward_trace": trace, "peak_mem_mb": peak_memory_mb()}
         print(f"[{name}] final reward={trace[-1]:+.3f} peak_mem={results[name]['peak_mem_mb']:.0f}MB")
 

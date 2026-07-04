@@ -16,6 +16,7 @@ from .decoding import (
 from .data import (
     build_synthetic_instruction_dataset, format_example, apply_template,
     build_synthetic_preference_dataset, format_preference, build_eval_prompt_set,
+    load_preference_dataset, load_prompt_set,
 )
 from .tokenization import (
     tokenize_example, build_labels, mask_prompt_labels, pad_batch,
@@ -32,7 +33,7 @@ from .lora import (
 )
 from .reward import (
     reward_head_forward, pairwise_reward_loss, reward_bce_loss,
-    pairwise_accuracy, reward_train_step,
+    pairwise_accuracy, reward_train_step, save_reward_model, load_reward_model,
 )
 from .ppo import (
     sequence_logprob, per_token_kl, compute_returns, gae_advantages,

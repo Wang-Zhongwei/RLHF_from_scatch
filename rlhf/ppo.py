@@ -52,9 +52,15 @@ def value_function_loss(values, returns):
 
 
 def entropy_bonus(logits):
-    """Mean categorical entropy of the distribution defined by ``logits``."""
-    probs = logits.softmax(dim=-1)
-    return -(probs * probs.log()).sum(dim=-1).mean()
+    """Mean categorical entropy of the distribution defined by ``logits``.
+
+    Uses ``log_softmax`` rather than ``softmax().log()`` so that probabilities that
+    underflow to 0 (common over a large vocab) give ``0 * finite = 0`` instead of
+    ``0 * -inf = nan``.
+    """
+    log_probs = logits.log_softmax(dim=-1)
+    probs = log_probs.exp()
+    return -(probs * log_probs).sum(dim=-1).mean()
 
 
 def ppo_loss(ratio, advantages, values, returns, logits,
