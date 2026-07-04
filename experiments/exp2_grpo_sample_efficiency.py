@@ -63,8 +63,9 @@ def run_ppo(policy, reference, reward_bundle, tokenizer, prompts, steps, group_s
     warm = value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts,
                              value_warmup, group_size, mnt, vf_lr=vf_lr)
     if warm is not None:
-        print(f"[ppo] value-head warmup ({value_warmup} steps) vf_loss={warm['vf_loss']:.4f} "
-              f"EV(mean V)={warm['ev']:+.3f} (target MC={warm['target']:+.3f})", flush=True)
+        print(f"[ppo] value-head warmup ({value_warmup} steps) vf_loss={warm['vf_loss']:.3f} "
+              f"explained_var={warm['explained_var']:+.3f} "
+              f"mean_V={warm['mean_v']:+.2f} (target MC={warm['target']:+.2f})", flush=True)
     trace = []
     for step in range(steps):
         prompt = prompts[step % len(prompts)]

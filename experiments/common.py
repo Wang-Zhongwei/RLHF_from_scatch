@@ -153,15 +153,15 @@ def value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts, war
     Regresses V(s) toward Monte-Carlo returns (discounted terminal RM reward) -- a
     fixed target that doesn't bootstrap off the random critic -- so PPO starts with a
     calibrated baseline instead of noise. Trains only the value head, at its own
-    (higher) LR. Returns ``{"vf_loss", "ev", "target"}`` measured on the last warmup
-    batch -- ``ev`` is the mean value the critic predicts (its expected value), and
-    ``target`` is the mean Monte-Carlo return it was regressed toward -- or None if
-    disabled.
+    (higher) LR. Returns ``{"vf_loss", "explained_var", "mean_v", "target"}`` or None
+    if disabled. ``explained_var`` = 1 - Var(returns - V) / Var(returns) is the standard
+    PPO critic-quality diagnostic (1 = perfect, 0 = predicts only the mean, <0 = worse),
+    measured over a fresh on-policy sample after warmup.
     """
     if warmup_steps <= 0:
         return None
     opt_v = torch.optim.AdamW(value_head.parameters(), lr=vf_lr)
-    stats = None
+    last_loss = None
     for step in range(warmup_steps):
         prompt = prompts[step % len(prompts)]
         with torch.no_grad():
@@ -179,13 +179,31 @@ def value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts, war
                                      dtype=torch.float32, device=hidden.device)
             values_l.append(value_head(hidden).squeeze(-1))
             returns_l.append(mc)
-        v_cat, r_cat = torch.cat(values_l), torch.cat(returns_l)
-        loss = value_function_loss(v_cat, r_cat)
+        loss = value_function_loss(torch.cat(values_l), torch.cat(returns_l))
         opt_v.zero_grad(); loss.backward()
         torch.nn.utils.clip_grad_norm_(value_head.parameters(), 1.0)
         opt_v.step()
-        stats = {"vf_loss": loss.item(), "ev": v_cat.mean().item(), "target": r_cat.mean().item()}
-    return stats
+        last_loss = loss.item()
+
+    # Critic-quality diagnostic on a fresh on-policy sample: explained variance.
+    vs, rs = [], []
+    with torch.no_grad():
+        for prompt in prompts[:min(len(prompts), 8)]:
+            seqs = sample_group(policy, tokenizer, prompt, group_size, max_new_tokens)
+            rewards = score_sequences(reward_bundle, tokenizer, seqs)
+            for seq, seq_reward in zip(seqs, rewards):
+                ids = seq.unsqueeze(0)
+                hidden = policy(ids, output_hidden_states=True).hidden_states[-1][0, :-1]
+                tr = torch.zeros(ids.shape[1] - 1, device=hidden.device)
+                tr[-1] = seq_reward
+                mc = torch.as_tensor(compute_returns(tr.cpu().numpy(), gamma),
+                                     dtype=torch.float32, device=hidden.device)
+                vs.append(value_head(hidden).squeeze(-1))
+                rs.append(mc)
+    V, R = torch.cat(vs), torch.cat(rs)
+    explained_var = (1 - (R - V).var(unbiased=False) / (R.var(unbiased=False) + 1e-8)).item()
+    return {"vf_loss": last_loss, "explained_var": explained_var,
+            "mean_v": V.mean().item(), "target": R.mean().item()}
 
 
 def save_aligned_policy(out_dir, policy, value_head=None, meta=None):

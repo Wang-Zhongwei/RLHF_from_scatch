@@ -85,8 +85,9 @@ def align_with_ppo(policy, reference, reward_bundle, tokenizer, prompts,
     warm = value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts,
                              value_warmup, group_size, max_new_tokens, vf_lr=vf_lr, gamma=gamma)
     if warm is not None:
-        print(f"[ppo] value-head warmup ({value_warmup} steps) vf_loss={warm['vf_loss']:.4f} "
-              f"EV(mean V)={warm['ev']:+.3f} (target MC={warm['target']:+.3f})", flush=True)
+        print(f"[ppo] value-head warmup ({value_warmup} steps) vf_loss={warm['vf_loss']:.3f} "
+              f"explained_var={warm['explained_var']:+.3f} "
+              f"mean_V={warm['mean_v']:+.2f} (target MC={warm['target']:+.2f})", flush=True)
     for step in range(steps):
         prompt = prompts[step % len(prompts)]
         ppo_value_head_update(policy, value_head, reference, reward_bundle, tokenizer, prompt,
