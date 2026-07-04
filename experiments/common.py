@@ -14,6 +14,7 @@ on GPU. With no checkpoint it falls back to the tiny synthetic RM so CI stays
 hermetic and offline.
 """
 import copy
+import json
 import os
 
 import torch
@@ -152,12 +153,15 @@ def value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts, war
     Regresses V(s) toward Monte-Carlo returns (discounted terminal RM reward) -- a
     fixed target that doesn't bootstrap off the random critic -- so PPO starts with a
     calibrated baseline instead of noise. Trains only the value head, at its own
-    (higher) LR. Returns the final value loss, or None if disabled.
+    (higher) LR. Returns ``{"vf_loss", "ev", "target"}`` measured on the last warmup
+    batch -- ``ev`` is the mean value the critic predicts (its expected value), and
+    ``target`` is the mean Monte-Carlo return it was regressed toward -- or None if
+    disabled.
     """
     if warmup_steps <= 0:
         return None
     opt_v = torch.optim.AdamW(value_head.parameters(), lr=vf_lr)
-    last = None
+    stats = None
     for step in range(warmup_steps):
         prompt = prompts[step % len(prompts)]
         with torch.no_grad():
@@ -175,12 +179,34 @@ def value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts, war
                                      dtype=torch.float32, device=hidden.device)
             values_l.append(value_head(hidden).squeeze(-1))
             returns_l.append(mc)
-        loss = value_function_loss(torch.cat(values_l), torch.cat(returns_l))
+        v_cat, r_cat = torch.cat(values_l), torch.cat(returns_l)
+        loss = value_function_loss(v_cat, r_cat)
         opt_v.zero_grad(); loss.backward()
         torch.nn.utils.clip_grad_norm_(value_head.parameters(), 1.0)
         opt_v.step()
-        last = loss.item()
-    return last
+        stats = {"vf_loss": loss.item(), "ev": v_cat.mean().item(), "target": r_cat.mean().item()}
+    return stats
+
+
+def save_aligned_policy(out_dir, policy, value_head=None, meta=None):
+    """Persist an aligned policy (+ optional PPO value head) under ``out_dir``.
+
+    Off by default in the experiments (metrics-only); pass ``--save-dir`` to enable.
+    Mirrors ``rlhf.save_reward_model``: config + a plain state_dict (reloadable with
+    ``AutoModelForCausalLM.from_pretrained``), avoiding save_pretrained's deepspeed path.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    policy.config.save_pretrained(out_dir)
+    torch.save({k: v.detach().cpu() for k, v in policy.state_dict().items()},
+               os.path.join(out_dir, "pytorch_model.bin"))
+    if value_head is not None:
+        torch.save({"weight": value_head.weight.detach().cpu(),
+                    "bias": value_head.bias.detach().cpu()},
+                   os.path.join(out_dir, "value_head.pt"))
+    with open(os.path.join(out_dir, "meta.json"), "w") as f:
+        json.dump(meta or {}, f, indent=2)
+    print("saved aligned policy ->", out_dir, flush=True)
+    return out_dir
 
 
 def ppo_value_head_update(policy, value_head, reference, reward_bundle, tokenizer, prompt,

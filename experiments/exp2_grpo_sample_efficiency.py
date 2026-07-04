@@ -60,11 +60,11 @@ def run_ppo(policy, reference, reward_bundle, tokenizer, prompts, steps, group_s
     value_head = torch.nn.Linear(hidden, 1).to(device)
     opt = torch.optim.AdamW(list(policy.parameters()) + list(value_head.parameters()), lr=lr)
     # Same critic warmup as exp1's PPO, so "PPO" is identical across both experiments.
-    warm_loss = value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts,
-                                  value_warmup, group_size, mnt, vf_lr=vf_lr)
-    if warm_loss is not None:
-        print(f"[ppo] value-head warmup ({value_warmup} steps) final vf_loss={warm_loss:.4f}",
-              flush=True)
+    warm = value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts,
+                             value_warmup, group_size, mnt, vf_lr=vf_lr)
+    if warm is not None:
+        print(f"[ppo] value-head warmup ({value_warmup} steps) vf_loss={warm['vf_loss']:.4f} "
+              f"EV(mean V)={warm['ev']:+.3f} (target MC={warm['target']:+.3f})", flush=True)
     trace = []
     for step in range(steps):
         prompt = prompts[step % len(prompts)]

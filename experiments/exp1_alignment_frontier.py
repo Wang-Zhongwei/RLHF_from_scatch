@@ -26,13 +26,13 @@ from rlhf import (
 )
 from experiments.common import (
     build_harness, sample_group, score_sequences, eval_reward_and_kl, clone_policy,
-    ppo_value_head_update, value_head_warmup,
+    ppo_value_head_update, value_head_warmup, save_aligned_policy,
 )
 
 
 def align_with_grpo(policy, reference, reward_bundle, tokenizer, prompts,
                     steps, group_size, max_new_tokens, kl_coef, lr=1e-5, clip_eps=0.2,
-                    pref_pairs=None):
+                    pref_pairs=None, save_dir=None):
     opt = torch.optim.AdamW(policy.parameters(), lr=lr)
     for step in range(steps):
         prompt = prompts[step % len(prompts)]
@@ -56,13 +56,15 @@ def align_with_grpo(policy, reference, reward_bundle, tokenizer, prompts,
         opt.zero_grad(); out["loss"].backward()
         torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
         opt.step()
+    if save_dir:
+        save_aligned_policy(save_dir, policy, meta={"method": "grpo", "kl_coef": kl_coef})
     return policy
 
 
 def align_with_ppo(policy, reference, reward_bundle, tokenizer, prompts,
                    steps, group_size, max_new_tokens, kl_coef, lr=1e-5,
                    clip_eps=0.2, vf_coef=0.5, ent_coef=0.01, gamma=0.99, lam=0.95,
-                   pref_pairs=None, value_warmup=0, vf_lr=1e-3):
+                   pref_pairs=None, value_warmup=0, vf_lr=1e-3, save_dir=None):
     # Faithful PPO: a learned value head supplies per-token GAE baselines and the
     # update is the scaffold's clipped surrogate + value loss + entropy bonus
     # (rlhf.ppo_loss), plus a k3 KL penalty to the frozen reference weighted by
@@ -80,18 +82,19 @@ def align_with_ppo(policy, reference, reward_bundle, tokenizer, prompts,
         list(policy.parameters()) + list(value_head.parameters()), lr=lr)
     # Warm the critic (policy frozen, V -> MC returns) before any policy update, so early
     # GAE advantages use a calibrated baseline instead of a random head.
-    warm_loss = value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts,
-                                  value_warmup, group_size, max_new_tokens, vf_lr=vf_lr,
-                                  gamma=gamma)
-    if warm_loss is not None:
-        print(f"[ppo] value-head warmup ({value_warmup} steps) final vf_loss={warm_loss:.4f}",
-              flush=True)
+    warm = value_head_warmup(policy, value_head, reward_bundle, tokenizer, prompts,
+                             value_warmup, group_size, max_new_tokens, vf_lr=vf_lr, gamma=gamma)
+    if warm is not None:
+        print(f"[ppo] value-head warmup ({value_warmup} steps) vf_loss={warm['vf_loss']:.4f} "
+              f"EV(mean V)={warm['ev']:+.3f} (target MC={warm['target']:+.3f})", flush=True)
     for step in range(steps):
         prompt = prompts[step % len(prompts)]
         ppo_value_head_update(policy, value_head, reference, reward_bundle, tokenizer, prompt,
                               opt, group_size, max_new_tokens, kl_coef,
                               clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef,
                               gamma=gamma, lam=lam)
+    if save_dir:
+        save_aligned_policy(save_dir, policy, value_head, meta={"method": "ppo", "kl_coef": kl_coef})
     return policy
 
 
@@ -118,7 +121,8 @@ def _response_logp(model, prompt, response, tokenizer, device, max_prompt=384, m
 
 
 def align_with_dpo(policy, reference, reward_bundle, tokenizer, prompts,
-                   steps, group_size, max_new_tokens, beta, lr=1e-5, pref_pairs=None):
+                   steps, group_size, max_new_tokens, beta, lr=1e-5, pref_pairs=None,
+                   save_dir=None):
     # True DPO on the dataset's real (chosen, rejected) pairs when available; falls
     # back to on-policy best/worst-by-RM pairs for the synthetic/CI path.
     opt = torch.optim.AdamW(policy.parameters(), lr=lr)
@@ -146,6 +150,8 @@ def align_with_dpo(policy, reference, reward_bundle, tokenizer, prompts,
         opt.zero_grad(); loss.backward()
         torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
         opt.step()
+    if save_dir:
+        save_aligned_policy(save_dir, policy, meta={"method": "dpo", "beta": beta})
     return policy
 
 
@@ -181,6 +187,8 @@ def main():
     ap.add_argument("--value-warmup", type=int, default=30,
                     help="PPO value-head warmup steps (critic pretrain before policy updates)")
     ap.add_argument("--vf-lr", type=float, default=1e-3, help="LR for the PPO value-head warmup")
+    ap.add_argument("--save-dir", default=None,
+                    help="if set, save each aligned policy (+ PPO value head) under results/<save-dir>/")
     ap.add_argument("--out", default="results/frontier.json")
     args = ap.parse_args()
 
@@ -219,6 +227,8 @@ def main():
             kw = dict(lr=args.rl_lr, pref_pairs=pref_pairs)
             if name == "ppo":
                 kw.update(value_warmup=args.value_warmup, vf_lr=args.vf_lr)
+            if args.save_dir:
+                kw["save_dir"] = os.path.join("results", args.save_dir, f"{name}_{coef}")
             aligner(policy, reference, reward_bundle, tokenizer, train_prompts,
                     steps, args.group_size, args.max_new_tokens, coef, **kw)
             reward, kl = eval_reward_and_kl(policy, reference, reward_bundle, tokenizer, eval_prompts,
