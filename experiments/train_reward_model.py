@@ -85,6 +85,8 @@ def main():
     tokenizer.truncation_side = "left"
     pad_id = tokenizer.pad_token_id
 
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
     backbone_model = load_model(args.model).to(device)
     if args.freeze_backbone:
         for p in backbone_model.parameters():
@@ -136,6 +138,15 @@ def main():
     meta = {"model": args.model, "dataset": args.dataset, "hidden": hidden,
             "max_length": args.max_length, "train_pairs": len(train), "val_pairs": len(val),
             "val_pairwise_acc": best_val}
+    # Resource usage: true PyTorch peak VRAM + peak host RAM (RSS), no extra deps.
+    import resource
+    peak_ram_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)  # KB->GB
+    peak_vram_gb = (torch.cuda.max_memory_allocated() / 1e9) if device == "cuda" else 0.0
+    meta["peak_vram_gb"] = round(peak_vram_gb, 2)
+    meta["peak_host_ram_gb"] = round(peak_ram_gb, 2)
+    print(f"peak VRAM={peak_vram_gb:.2f} GB  peak host RAM={peak_ram_gb:.2f} GB "
+          f"(batch_size={args.batch_size}, max_length={args.max_length})")
+
     save_reward_model(args.out, backbone_model, head, meta)
     with open(os.path.join(args.out, "train_log.json"), "w") as f:
         json.dump(meta, f, indent=2)
