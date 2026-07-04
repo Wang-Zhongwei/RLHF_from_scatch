@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+logs/
+results/
+*.png
+.pytest_cache/
+.serena/
+.DS_Store
