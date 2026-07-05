@@ -28,6 +28,7 @@ from rlhf.sampling import sample_completions, gen_logprobs
 from rlhf.parallel import (
     setup_distributed, cleanup_distributed, is_main_process, all_reduce_mean,
     wrap_ddp, wrap_fsdp, gpt2_block_cls, qwen_block_cls, peak_memory_mb,
+    gather_full_state_dict, unwrap_model,
 )
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -50,6 +51,24 @@ def _reward_for(seq, mask, tokenizer, gold):
     gen_ids = seq[mask]
     text = tokenizer.decode(gen_ids, skip_special_tokens=True)
     return 1.0 if is_correct(extract_pred(text), gold) else 0.0
+
+
+def save_checkpoint(model, tokenizer, ckpt_dir, tag):
+    """Write an HF-reloadable policy snapshot (config + pytorch_model.bin + tokenizer).
+
+    The full state dict is gathered onto rank 0 (FSDP-safe; see rlhf/parallel/fsdp.py):
+    every rank must enter the gather collective in lockstep, but only rank 0 has the
+    weights and writes them. Reloads with ``AutoModelForCausalLM.from_pretrained(out)``.
+    """
+    sd = gather_full_state_dict(model)  # collective — all ranks call; populated on rank 0
+    if not is_main_process():
+        return
+    out = os.path.join(ckpt_dir, tag)
+    os.makedirs(out, exist_ok=True)
+    unwrap_model(model).config.save_pretrained(out)
+    torch.save(sd, os.path.join(out, "pytorch_model.bin"))
+    tokenizer.save_pretrained(out)
+    print(f"[ckpt] {tag} -> {out}", flush=True)
 
 
 @torch.no_grad()
@@ -85,6 +104,11 @@ def main():
     ap.add_argument("--n-train", type=int, default=4000)
     ap.add_argument("--n-eval", type=int, default=200)
     ap.add_argument("--eval-every", type=int, default=50)
+    ap.add_argument("--ckpt-dir", default=None,
+                    help="if set, save HF-reloadable policy checkpoints here (off by default "
+                         "so the benchmark's throughput isn't skewed by checkpoint I/O)")
+    ap.add_argument("--save-every", type=int, default=0,
+                    help="save a checkpoint every N steps when --ckpt-dir is set (0 = final only)")
     ap.add_argument("--out", default="results/gsm8k_grpo.json")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny-gpt2 + tiny sizes to validate plumbing (CPU/1-GPU)")
@@ -94,6 +118,7 @@ def main():
         args.model = "sshleifer/tiny-gpt2"
         args.steps, args.group_size, args.max_new_tokens = 3, 2, 8
         args.n_train, args.n_eval, args.eval_every = 8, 4, 2
+        args.out = "results/gsm8k_grpo_smoke.json"  # never clobber the real benchmark JSON
 
     rank, local_rank, world_size, device = setup_distributed()
     tokenizer = set_pad_token_to_eos(load_tokenizer(args.model))
@@ -123,7 +148,7 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     reward_trace, acc_trace = [], []
-    t0 = None
+    t0, save_time = None, 0.0
     for step in range(args.steps):
         if step == 1:  # skip step 0 (warmup/compile) from the throughput timer
             if torch.cuda.is_available():
@@ -158,12 +183,25 @@ def main():
                 print(f"[step {step + 1}/{args.steps}] train_reward="
                       f"{reward_trace[-1]:.3f} eval_acc={acc:.3f}", flush=True)
 
+        # Periodic checkpoint. I/O is measured out of the throughput timer below so the
+        # benchmark stays comparable whether or not checkpointing is enabled.
+        if args.ckpt_dir and args.save_every and (step + 1) % args.save_every == 0 \
+                and step != args.steps - 1:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            _s = time.perf_counter()
+            save_checkpoint(model, tokenizer, args.ckpt_dir, f"step{step + 1}")
+            save_time += time.perf_counter() - _s
+
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-    elapsed = (time.perf_counter() - t0) if t0 else float("nan")
+    elapsed = (time.perf_counter() - t0 - save_time) if t0 else float("nan")
     timed_steps = max(args.steps - 1, 1)
     throughput = (timed_steps * args.group_size) / elapsed if elapsed == elapsed else float("nan")
     peak = peak_memory_mb()
+
+    if args.ckpt_dir:  # final policy snapshot (collective: every rank enters the gather)
+        save_checkpoint(model, tokenizer, args.ckpt_dir, "final")
 
     if is_main_process():
         rec = {

@@ -69,3 +69,28 @@ def peak_memory_mb():
     if not torch.cuda.is_available():
         return 0.0
     return torch.cuda.max_memory_allocated() / (1024 ** 2)
+
+
+def unwrap_model(model):
+    """Return the underlying HF module inside an FSDP/DDP wrapper (or the model itself)."""
+    return model.module if hasattr(model, "module") else model
+
+
+def gather_full_state_dict(model):
+    """Return a full (unsharded) CPU ``state_dict`` on rank 0, ``{}`` on other ranks.
+
+    Under FSDP the parameters are sharded, so saving requires reassembling the whole
+    model on one rank. ``FULL_STATE_DICT`` with ``rank0_only`` + CPU offload does that
+    without every rank materializing the full model (which would defeat the point of
+    sharding). This is a **collective** — every rank must call it, in lockstep — but
+    only rank 0 gets populated data. For DDP / single-GPU it's just the CPU state_dict
+    of the underlying module.
+    """
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+
+    if isinstance(model, FSDP):
+        cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
+            return model.state_dict()
+    return {k: v.detach().cpu() for k, v in unwrap_model(model).state_dict().items()}

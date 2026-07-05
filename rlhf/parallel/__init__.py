@@ -7,7 +7,14 @@ from .dist import (
     is_main_process,
     setup_distributed,
 )
-from .fsdp import gpt2_block_cls, peak_memory_mb, qwen_block_cls, wrap_fsdp
+from .fsdp import (
+    gather_full_state_dict,
+    gpt2_block_cls,
+    peak_memory_mb,
+    qwen_block_cls,
+    unwrap_model,
+    wrap_fsdp,
+)
 from .tensor_parallel import ColumnParallelLinear, RowParallelLinear
 
 __all__ = [
@@ -23,4 +30,6 @@ __all__ = [
     "gpt2_block_cls",
     "qwen_block_cls",
     "peak_memory_mb",
+    "gather_full_state_dict",
+    "unwrap_model",
 ]
