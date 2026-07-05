@@ -36,7 +36,7 @@ sbatch scripts/train_reward.slurm                 # gpt2-medium, 10k pairs, 2 ep
 
 ### 3. Alignment frontier + sample efficiency  → `results/frontier.json`, `results/sample_eff.json`
 ```bash
-sbatch scripts/train_hpc.slurm    # loads results/reward_model (fails loudly if missing)
+sbatch scripts/align.slurm    # loads results/reward_model (fails loudly if missing)
 ```
 - exp1 = reward-vs-KL frontier for PPO / GRPO / DPO; exp2 = GRPO-vs-PPO reward-per-step + peak mem.
 - 200 steps, group 8, `--rl-lr 5e-6`, rollouts on **128 train-split** prompts, eval on a
@@ -54,11 +54,7 @@ sbatch --gres=gpu:a100:4 scripts/bench_parallel.slurm   # sweeps world_size 1,2,
 ```
 Peak memory/GPU falls (ZeRO-3 shards optimizer state), e.g. gpt2-medium 9.0 → 4.9 → 3.6 GB.
 
-### 5. Render the results figure  → `figures/showcase.png` (committed, shown in README)
-```bash
-python -m experiments.plot_showcase       # reads results/{reward_model,frontier,sample_eff,bench_parallel}
-cp results/showcase.png figures/showcase.png
-```
+### 5. Render the results figure (todo)
 
 ## Layout of the alignment code
 - `rlhf/` — from-scratch primitives: `reward.py` (RM + save/load), `ppo.py`, `grpo.py`,

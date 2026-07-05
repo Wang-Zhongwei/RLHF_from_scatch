@@ -32,7 +32,7 @@ preferences from `Dahoas/rm-static`:
   memory/GPU from 9.0 GB → 3.6 GB across 1→4 GPUs.
 
 Reproduce: train the reward model (`scripts/train_reward.slurm`), then
-`scripts/train_hpc.slurm` (frontier + sample efficiency) and `scripts/bench_parallel.slurm`
+`scripts/align.slurm` (frontier + sample efficiency) and `scripts/bench_parallel.slurm`
 (scaling), and render with `python -m experiments.plot_showcase`.
 
 ## Layout
@@ -118,6 +118,6 @@ a dense `nn.Linear` in `tests/test_tensor_parallel.py`.
 ```bash
 git clone <repo> && cd RLHF_from_scatch
 python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
-sbatch scripts/train_hpc.slurm       # the two headline experiments (1 GPU)
+sbatch scripts/align.slurm       # the two headline experiments (1 GPU)
 sbatch scripts/bench_parallel.slurm  # FSDP scaling sweep (4 GPUs)
 ```
