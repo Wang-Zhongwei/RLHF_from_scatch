@@ -11,7 +11,7 @@ Everything runs on CPU with a tiny model for fast iteration and scales to real c
 
 > 📊 **[Interactive walkthrough of the results →](https://claude.ai/code/artifact/0adddf62-f547-4a88-bcae-2f8896d6ac97)**
 
-## What it demonstrates
+## Highlights
 
 - **Reward modeling** — a Bradley–Terry model on real human preferences: **68%** held-out
   pairwise accuracy (50% = random).
