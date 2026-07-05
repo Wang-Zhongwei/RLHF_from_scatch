@@ -229,7 +229,8 @@ def save_aligned_policy(out_dir, policy, value_head=None, meta=None):
 
 def ppo_value_head_update(policy, value_head, reference, reward_bundle, tokenizer, prompt,
                           opt, group_size, max_new_tokens, kl_coef,
-                          clip_eps=0.2, vf_coef=0.5, ent_coef=0.01, gamma=0.99, lam=0.95):
+                          clip_eps=0.2, vf_coef=0.5, ent_coef=0.01, gamma=0.99, lam=0.95,
+                          log_ev=False):
     """One value-head PPO update over a group sampled for ``prompt``; returns mean reward.
 
     Shared by exp1 (frontier) and exp2 (sample efficiency) so "PPO" is the *same*
@@ -273,4 +274,9 @@ def ppo_value_head_update(policy, value_head, reference, reward_bundle, tokenize
     opt.zero_grad(); loss.backward()
     torch.nn.utils.clip_grad_norm_([p for g in opt.param_groups for p in g["params"]], 1.0)
     opt.step()
+    if log_ev:  # critic quality during training: explained variance vs the GAE returns
+        with torch.no_grad():
+            ev = (1 - (returns - values).var(unbiased=False)
+                  / (returns.var(unbiased=False) + 1e-8)).item()
+        print(f"[ppo]   in-training explained_var(vs GAE returns)={ev:+.3f}", flush=True)
     return rewards.mean().item()

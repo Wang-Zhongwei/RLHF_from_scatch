@@ -89,9 +89,11 @@ def main():
     ap.add_argument("--n-prompts", type=int, default=None,
                     help="back-compat: if set, overrides --n-train-prompts")
     ap.add_argument("--rl-lr", type=float, default=1e-5)
-    ap.add_argument("--value-warmup", type=int, default=30,
+    ap.add_argument("--value-warmup", type=int, default=100,
                     help="PPO value-head warmup steps (critic pretrain before policy updates)")
     ap.add_argument("--vf-lr", type=float, default=1e-3, help="LR for the PPO value-head warmup")
+    ap.add_argument("--methods", nargs="+", choices=["grpo", "ppo"], default=None,
+                    help="run only these methods and merge them into an existing --out")
     ap.add_argument("--out", default="results/sample_eff.json")
     args = ap.parse_args()
 
@@ -106,8 +108,12 @@ def main():
               f"training set", flush=True)
         steps = len(train_prompts)
 
-    results = {}
-    for name, runner in [("grpo", run_grpo), ("ppo", run_ppo)]:
+    runners = {"grpo": run_grpo, "ppo": run_ppo}
+    to_run = args.methods or list(runners)
+    # --methods ppo merges the new PPO trace into an existing sample_eff.json (keeps grpo).
+    results = json.load(open(args.out)) if (args.methods and os.path.exists(args.out)) else {}
+    for name in to_run:
+        runner = runners[name]
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         policy = clone_policy(base)

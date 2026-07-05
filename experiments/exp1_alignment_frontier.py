@@ -93,7 +93,7 @@ def align_with_ppo(policy, reference, reward_bundle, tokenizer, prompts,
         ppo_value_head_update(policy, value_head, reference, reward_bundle, tokenizer, prompt,
                               opt, group_size, max_new_tokens, kl_coef,
                               clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef,
-                              gamma=gamma, lam=lam)
+                              gamma=gamma, lam=lam, log_ev=(step % 50 == 0))
     if save_dir:
         save_aligned_policy(save_dir, policy, value_head, meta={"method": "ppo", "kl_coef": kl_coef})
     return policy
@@ -185,11 +185,13 @@ def main():
                     help="back-compat: if set, overrides --n-train-prompts")
     ap.add_argument("--rl-lr", type=float, default=1e-5,
                     help="policy LR for the RL aligners; lower avoids reward-hacking collapse")
-    ap.add_argument("--value-warmup", type=int, default=30,
+    ap.add_argument("--value-warmup", type=int, default=100,
                     help="PPO value-head warmup steps (critic pretrain before policy updates)")
     ap.add_argument("--vf-lr", type=float, default=1e-3, help="LR for the PPO value-head warmup")
     ap.add_argument("--save-dir", default=None,
                     help="if set, save each aligned policy (+ PPO value head) under results/<save-dir>/")
+    ap.add_argument("--methods", nargs="+", choices=list(METHODS), default=None,
+                    help="run only these methods and merge them into an existing --out (keeps the rest)")
     ap.add_argument("--out", default="results/frontier.json")
     args = ap.parse_args()
 
@@ -216,12 +218,22 @@ def main():
         pref_pairs = load_preference_dataset(args.dataset, "train",
                                              max_examples=max(steps, 500))
 
-    # Base and every method are scored on the held-out eval prompts, never the train set.
-    r0, kl0 = eval_reward_and_kl(base_policy, reference, reward_bundle, tokenizer, eval_prompts,
-                                 args.group_size, args.max_new_tokens)
-    frontier = {"base": {"reward": r0, "kl": kl0}, "methods": {}}
+    # PPO-only style re-runs: --methods ppo recomputes just those methods and merges
+    # them into the existing frontier.json (keeping base + the untouched methods).
+    methods_to_run = args.methods or list(METHODS)
+    merge = bool(args.methods) and os.path.exists(args.out)
+    if merge:
+        frontier = json.load(open(args.out))
+        frontier.setdefault("methods", {})
+        print(f"[exp1] merging {methods_to_run} into existing {args.out} (base + others kept)", flush=True)
+    else:
+        # Base and every method are scored on the held-out eval prompts, never the train set.
+        r0, kl0 = eval_reward_and_kl(base_policy, reference, reward_bundle, tokenizer, eval_prompts,
+                                     args.group_size, args.max_new_tokens)
+        frontier = {"base": {"reward": r0, "kl": kl0}, "methods": {}}
 
-    for name, aligner in METHODS.items():
+    for name in methods_to_run:
+        aligner = METHODS[name]
         frontier["methods"][name] = []
         for coef in sweeps[name]:
             policy = clone_policy(base_policy)
