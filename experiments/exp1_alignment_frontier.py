@@ -253,7 +253,7 @@ def main():
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(frontier, f, indent=2)
-    print(f"Wrote {args.out}. Plot with experiments/plot_frontier.py")
+    print(f"Wrote {args.out}. Plot with experiments/plot_alignment.py")
 
 
 if __name__ == "__main__":

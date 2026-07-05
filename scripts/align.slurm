@@ -47,4 +47,5 @@ python -m experiments.exp2_grpo_sample_efficiency \
   --value-warmup 300 --vf-lr 1e-3 \
   --out results/sample_eff.json
 
-python -m experiments.plot_frontier results/frontier.json results/sample_eff.json
+python -m experiments.plot_alignment    # -> results/alignment.png
+mkdir -p figures && cp -f results/alignment.png figures/ || true   # refresh README figure

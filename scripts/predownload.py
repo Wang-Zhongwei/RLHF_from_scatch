@@ -12,8 +12,10 @@ the compute-side loader (rlhf.data._load_split) reads those parquet shards direc
 """
 from huggingface_hub import snapshot_download
 
-MODELS = ["gpt2", "gpt2-medium"]
-DATASETS = ["Dahoas/rm-static"]
+# gpt2 / gpt2-medium + Dahoas/rm-static -> the alignment track (reward model + frontier).
+# Qwen2.5-0.5B-Instruct + openai/gsm8k    -> the GSM8K-GRPO track.
+MODELS = ["gpt2", "gpt2-medium", "Qwen/Qwen2.5-0.5B-Instruct"]
+DATASETS = ["Dahoas/rm-static", "openai/gsm8k"]
 
 for m in MODELS:
     p = snapshot_download(m, allow_patterns=["*.json", "*.txt", "*.safetensors",
