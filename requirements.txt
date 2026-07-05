@@ -1,5 +1,7 @@
 torch>=2.1
 transformers>=4.38
+datasets>=2.14
+safetensors>=0.4
 numpy>=1.24
 matplotlib>=3.7
 pytest>=7.4

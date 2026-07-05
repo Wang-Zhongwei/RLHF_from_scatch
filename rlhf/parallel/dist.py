@@ -44,3 +44,12 @@ def cleanup_distributed():
 
 def is_main_process():
     return (not dist.is_initialized()) or dist.get_rank() == 0
+
+
+def all_reduce_mean(value, device):
+    """Average a Python scalar across all ranks (identity if not distributed)."""
+    if not dist.is_initialized() or dist.get_world_size() == 1:
+        return float(value)
+    t = torch.tensor([float(value)], device=device)
+    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return (t / dist.get_world_size()).item()

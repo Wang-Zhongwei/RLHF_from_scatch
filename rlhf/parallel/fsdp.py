@@ -4,7 +4,8 @@ state across data-parallel ranks.
 FSDP is the memory lever for post-training: with the reference model, policy,
 and (for PPO) a value head all resident, a 7B policy will not fit on one 24 GB
 GPU. Sharding parameters, gradients, and optimizer state across N ranks cuts
-per-GPU state by ~N, which is what ``experiments/bench_parallel.py`` measures.
+per-GPU state by ~N, which is what ``experiments/gsm8k_grpo.py`` measures (single vs
+DDP vs FSDP).
 
 We wrap per-transformer-block so all-gather/reduce-scatter overlaps compute.
 """
@@ -55,6 +56,12 @@ def gpt2_block_cls():
     """Return the GPT2Block class for the auto-wrap policy (lazy import)."""
     from transformers.models.gpt2.modeling_gpt2 import GPT2Block
     return GPT2Block
+
+
+def qwen_block_cls():
+    """Return the Qwen2 decoder-block class for the auto-wrap policy (lazy import)."""
+    from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
+    return Qwen2DecoderLayer
 
 
 def peak_memory_mb():
