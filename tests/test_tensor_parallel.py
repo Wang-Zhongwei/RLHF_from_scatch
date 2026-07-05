@@ -2,7 +2,8 @@
 
 On a single process (world_size=1) the sharded layers must be numerically
 identical to a plain nn.Linear — this guards the sharding/collective math. The
-true multi-rank equivalence is exercised under torchrun in CI/slurm.
+true multi-rank equivalence (real NCCL collectives) is checked on 4×A100 by
+``experiments/tp_check.py``, run as part of ``scripts/gsm8k_grpo.slurm``.
 """
 import torch
 

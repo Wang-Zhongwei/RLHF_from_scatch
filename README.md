@@ -20,8 +20,9 @@ Everything runs on CPU with a tiny model for fast iteration and scales to real c
   ORPO / SimPO.
 - **A real reasoning result** — the DeepSeek-R1 recipe (GRPO on a *verifiable* reward)
   lifts grade-school-math accuracy **32% → 46%**.
-- **Distributed internals** — hand-written DDP, FSDP/ZeRO-3, and Megatron-style tensor
-  parallelism, benchmarked for the real memory/throughput tradeoff.
+- **Distributed internals** — hand-written DDP and FSDP/ZeRO-3, benchmarked for the real
+  memory/throughput tradeoff, plus from-scratch Megatron-style tensor parallelism verified
+  numerically against a dense layer across **4×A100**.
 
 ## Results
 
@@ -70,8 +71,8 @@ python scripts/predownload.py        # once, on the login node (caches models + 
 sbatch scripts/train_reward.slurm    # reward model     → results/reward_model/
 sbatch scripts/align.slurm           # frontier + sample efficiency → figures/alignment.png
 
-# Part 2 — GRPO on GSM8K
-sbatch scripts/gsm8k_grpo.slurm      # single/DDP/FSDP sweep → figures/gsm8k_grpo.png
+# Part 2 — GRPO on GSM8K (the 4-GPU job also runs the tensor-parallel correctness check)
+sbatch scripts/gsm8k_grpo.slurm      # single/DDP/FSDP sweep + TP check → figures/gsm8k_grpo.png
 ```
 
 ## Layout
@@ -83,7 +84,8 @@ sbatch scripts/gsm8k_grpo.slurm      # single/DDP/FSDP sweep → figures/gsm8k_g
   `lora.py`, `eval.py`.
 - **`rlhf/parallel/`** — `dist.py` (NCCL bootstrap), `ddp.py`, `fsdp.py` (ZeRO-3 +
   peak-mem), `tensor_parallel.py` (Megatron column/row-parallel linears with custom
-  autograd collectives, verified against `nn.Linear` in `tests/test_tensor_parallel.py`).
+  autograd collectives, checked against dense `nn.Linear` single-process in
+  `tests/test_tensor_parallel.py` and multi-rank on 4×A100 via `experiments/tp_check.py`).
 - **`experiments/`** — `train_reward_model.py`, `exp1_alignment_frontier.py`,
   `exp2_grpo_sample_efficiency.py`, `gsm8k_grpo.py`, the `plot_*` renderers,
   `pipeline_demo.py`, and `common.py` (shared alignment harness).

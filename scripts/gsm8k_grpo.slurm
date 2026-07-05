@@ -42,5 +42,11 @@ run single 1 || echo "!! single strategy failed"     # baseline: full model + op
 run ddp    4 || echo "!! ddp strategy failed"         # replicated: same per-GPU mem, ~4x throughput
 run fsdp   4 || echo "!! fsdp strategy failed"        # ZeRO-3: optimizer state sharded -> ~1/N mem
 
+# Tensor-parallel correctness on the same 4-GPU node: shard a dense layer across 4 ranks and
+# assert the from-scratch column->row block matches a plain nn.Linear (real NCCL collectives).
+echo "=== tensor-parallel check (nproc=4) ==="
+torchrun --standalone --nproc_per_node=4 -m experiments.tp_check \
+  || echo "!! tensor-parallel check failed"
+
 python -m experiments.plot_gsm8k || true
 mkdir -p figures && cp -f results/gsm8k_grpo.png figures/ || true   # refresh README figure

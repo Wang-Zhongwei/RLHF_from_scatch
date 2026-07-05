@@ -105,10 +105,12 @@ under three parallel strategies and renders `results/gsm8k_grpo.png` (via `plot_
   train/eval prompts), `sample_group`, `score_sequences`, `eval_reward_and_kl`, and the shared
   value-head PPO (`ppo_value_head_update`, `value_head_warmup`). Imported by exp1 and exp2.
 - Experiments: `train_reward_model.py`, `exp1_alignment_frontier.py`,
-  `exp2_grpo_sample_efficiency.py` (Part 1); `gsm8k_grpo.py` (Part 2).
+  `exp2_grpo_sample_efficiency.py` (Part 1); `gsm8k_grpo.py` (Part 2);
+  `tp_check.py` (multi-rank tensor-parallel correctness check, torchrun).
 - Plotters: `plot_alignment.py` (→ `results/alignment.png`), `plot_gsm8k.py`
   (→ `results/gsm8k_grpo.png`).
-- Scripts (`scripts/`): `predownload.py`, `train_reward.slurm`, `align.slurm`, `gsm8k_grpo.slurm`.
+- Scripts (`scripts/`): `predownload.py`, `train_reward.slurm`, `align.slurm`, `gsm8k_grpo.slurm`
+  (the 4-GPU sweep also runs `experiments.tp_check`, the 4×A100 tensor-parallel check).
 
 ## Notes / gotchas
 - Part 1 experiments run on GPU only if a real RM checkpoint exists (`--rm-dir`); with none they
